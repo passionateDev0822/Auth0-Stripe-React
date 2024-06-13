@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt
@@ -6,6 +6,7 @@ from jose.exceptions import JWTError
 import requests
 import stripe
 import stripe.error
+import requests
 
 AUTH0_DOMAIN = 'dev-14esgtg5auxfzaca.us.auth0.com'
 #API_AUDIENC = 'https://reactAuth0Stripe.com'
@@ -14,58 +15,64 @@ STRIPE_SECRET_KEY = 'sk_test_51PQbqi08tGGq5KGVlW4AFpjnVhT7BqAgpCAQwBv6C3wPFvQtxO
 
 stripe.api_key = STRIPE_SECRET_KEY
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:3000'],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def get_jwk():
-    jwks_url = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
-    jwks = requests.get(jwks_url).json()
-    return jwks
-
-def verify_token(token: str = Depends(oauth2_scheme)):
+@app.get("/products")
+async def get_products():
     try:
-        jwks = get_jwk()
-        unverified_header = jwt.get_unverified_header(token)
-        ras_key = {}
-        for key in jwks["keys"]:
-            rsa_key = {
-                "kty" : key["kty"],
-                "kid" : key["kid"],
-                "use" : key["use"],
-                "n" : key["n"],
-                "e" : key["e"],
-            }
-        if ras_key:
-            payload = jwt.decode(token, ras_key, algorithms=ALGORITHMS)
-            return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invaild token")
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Unable to parse authentication")
-    
-    raise HTTPException(status_code=401, detail="Invaild token")
+        products = stripe.Product.list()
+        product_data = []
+        
+        for product in products['data']:
+            # Ensure to retrieve a recurring price
+            prices = stripe.Price.list(product=product['id'], type='recurring')
+            if prices.data:
+                price = prices.data[0]
+                product_info = {
+                    'id': product.id,
+                    'name': product.name,
+                    'description': product.description,
+                    'images': product.images,
+                    'price_id': price.id,
+                    'price': price.unit_amount,  # Price in cents
+                    'currency': price.currency,
+                }
+                product_data.append(product_info)
 
-@app.get("/secure-data")
-async def secure_data(token: str = Depends(verify_token)):
-    return {"message": "This is a secure endpoint", "user": token}
+        return product_data
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/create-payment-intent")
-async def create_payment_intent(amount: int, toekn: str = Depends(verify_token)):
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(request: Request):
+    data = await request.json()
+    price_id = data.get('price_id')
+    print('Received price ID:', price_id)  # Debugging line
+
+    if not price_id:
+        raise HTTPException(status_code=400, detail="Price ID not provided")
+
     try:
-        intent = stripe.PaymentIntent.create(
-            amount=amount,
-            currency='usd'
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price': price_id,
+                'quantity': 1,
+            }],
+            mode='subscription',
+            success_url='http://localhost:3000/success',
+            cancel_url='http://localhost:3000/cancel',
         )
-        return {"client_secret": intent["client_secret"]}
+        return {"id": session.id}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
